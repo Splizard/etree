@@ -4,7 +4,10 @@
 
 package etree
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 var testXML = `
 <?xml version="1.0" encoding="UTF-8"?>
@@ -219,4 +222,18 @@ func TestAbsolutePath(t *testing.T) {
 			t.Errorf("etree: absolute path test failed")
 		}
 	}
+}
+
+func TestMake(t *testing.T) {
+	doc := NewDocument()
+
+	doc.MakeElement("People").CreateComment("These are all known people")
+	doc.MakeElement("People/Person[@name='Jon']")
+	doc.MakeElement("People/Person[@name='Sally']")
+	doc.MakeElement("Animals[type=4]")
+	doc.MakeElement("Animals[type=7]")
+	doc.MakeElement("Animals[5]/type")
+	doc.MakeElement("Animals[2]/type")
+	doc.Indent(2)
+	doc.WriteTo(os.Stdout)
 }

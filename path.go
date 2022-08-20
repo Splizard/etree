@@ -5,6 +5,7 @@
 package etree
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -33,11 +34,13 @@ The following selectors are supported by etree paths:
     tag             Select all child elements with a name matching the tag.
 
 The following basic filters are supported:
+(these filters can be used by Make functions to create a Path)
 
     [@attrib]       Keep elements with an attribute named attrib.
     [@attrib='val'] Keep elements with an attribute named attrib and value matching val.
     [tag]           Keep elements with a child element named tag.
     [tag='val']     Keep elements with a child element named tag and text matching val.
+	[tag=n]         Keep elements with a child element named tag and an integer value matching n.
     [n]             Keep the n-th element, where n is a numeric index starting from 1.
 
 The following function-based filters are supported:
@@ -130,16 +133,37 @@ func (seg *segment) apply(e *Element, p *pather) {
 	}
 }
 
+func (seg *segment) build(e *Element, b *builder) {
+	b.pather = *newPather()
+	b.sel = seg.sel
+	seg.apply(e, &b.pather)
+
+	if len(b.pather.candidates) > 0 {
+		b.result = b.pather.candidates[0]
+		fmt.Println(b.result)
+		return
+	}
+
+	seg.sel.build(e, b)
+
+	for i, f := range seg.filters {
+		b.filter = seg.filters[:i]
+		f.build(b)
+	}
+}
+
 // A selector selects XML elements for consideration by the
 // path traversal.
 type selector interface {
 	apply(e *Element, p *pather)
+	build(e *Element, b *builder)
 }
 
 // A filter pares down a list of candidate XML elements based
 // on a path filter in [brackets].
 type filter interface {
 	apply(p *pather)
+	build(b *builder)
 }
 
 // A pather is helper object that traverses an element tree using
@@ -151,6 +175,23 @@ type pather struct {
 	inResults  map[*Element]bool
 	candidates []*Element
 	scratch    []*Element // used by filters
+}
+
+type builder struct {
+	pather pather
+
+	sel    selector
+	filter []filter
+
+	path   Path
+	result *Element
+}
+
+func newBuilder(path Path) *builder {
+	return &builder{
+		path:   path,
+		pather: *newPather(),
+	}
 }
 
 // A node represents an element and the remaining path segments that
@@ -177,6 +218,14 @@ func (p *pather) traverse(e *Element, path Path) []*Element {
 		p.eval(p.queue.remove().(node))
 	}
 	return p.results
+}
+
+func (b *builder) traverse(e *Element) *Element {
+	b.result = e
+	for _, seg := range b.path.segments {
+		seg.build(b.result, b)
+	}
+	return b.result
 }
 
 // eval evalutes the current path node by applying the remaining
@@ -281,12 +330,17 @@ func (c *compiler) parseSelector(path string) selector {
 	}
 }
 
-var fnTable = map[string]func(e *Element) string{
-	"local-name":       (*Element).name,
-	"name":             (*Element).FullTag,
-	"namespace-prefix": (*Element).namespacePrefix,
-	"namespace-uri":    (*Element).NamespaceURI,
-	"text":             (*Element).Text,
+type pathFunctions struct {
+	get func(*Element) string
+	set func(*Element, string)
+}
+
+var fnTable = map[string]pathFunctions{
+	"local-name":       {(*Element).name, (*Element).setName},
+	"name":             {(*Element).FullTag, (*Element).setFullTag},
+	"namespace-prefix": {(*Element).namespacePrefix, (*Element).setNamespacePrefix},
+	"namespace-uri":    {(*Element).NamespaceURI, (*Element).setNamespaceURI},
+	"text":             {(*Element).Text, (*Element).SetText},
 }
 
 // parseFilter parses a path filter contained within [brackets].
@@ -323,6 +377,19 @@ func (c *compiler) parseFilter(path string) filter {
 		}
 	}
 
+	eqindex = strings.Index(path, "=")
+	if eqindex >= 0 {
+		key := path[:eqindex]
+		value := path[eqindex+1:]
+
+		if isInteger(value) {
+			return newFilterChildText(key, value)
+		} else {
+			c.err = ErrPath("path has invalid filter value " + value)
+			return nil
+		}
+	}
+
 	// Filter contains [@attr], [N], [tag] or [fn()]
 	switch {
 	case path[0] == '@':
@@ -350,12 +417,24 @@ func (c *compiler) parseFilter(path string) filter {
 // selectSelf selects the current element into the candidate list.
 type selectSelf struct{}
 
+func (s *selectSelf) build(e *Element, b *builder) {
+	b.result = e
+}
+
 func (s *selectSelf) apply(e *Element, p *pather) {
 	p.candidates = append(p.candidates, e)
 }
 
 // selectRoot selects the element's root node.
 type selectRoot struct{}
+
+func (s *selectRoot) build(e *Element, b *builder) {
+	root := e
+	for root.parent != nil {
+		root = root.parent
+	}
+	b.result = root
+}
 
 func (s *selectRoot) apply(e *Element, p *pather) {
 	root := e
@@ -368,6 +447,14 @@ func (s *selectRoot) apply(e *Element, p *pather) {
 // selectParent selects the element's parent into the candidate list.
 type selectParent struct{}
 
+func (s *selectParent) build(e *Element, b *builder) {
+	if e.parent != nil {
+		b.result = e.parent
+	}
+	b.result = new(Element)
+	b.result.AddChild(e)
+}
+
 func (s *selectParent) apply(e *Element, p *pather) {
 	if e.parent != nil {
 		p.candidates = append(p.candidates, e.parent)
@@ -377,6 +464,11 @@ func (s *selectParent) apply(e *Element, p *pather) {
 // selectChildren selects the element's child elements into the
 // candidate list.
 type selectChildren struct{}
+
+func (s *selectChildren) build(e *Element, b *builder) {
+	b.result = new(Element)
+	e.AddChild(b.result)
+}
 
 func (s *selectChildren) apply(e *Element, p *pather) {
 	for _, c := range e.Child {
@@ -389,6 +481,11 @@ func (s *selectChildren) apply(e *Element, p *pather) {
 // selectDescendants selects all descendant child elements
 // of the element into the candidate list.
 type selectDescendants struct{}
+
+func (s *selectDescendants) build(e *Element, b *builder) {
+	b.result = new(Element)
+	e.addChild(b.result)
+}
 
 func (s *selectDescendants) apply(e *Element, p *pather) {
 	var queue fifo
@@ -414,6 +511,10 @@ func newSelectChildrenByTag(path string) *selectChildrenByTag {
 	return &selectChildrenByTag{s, l}
 }
 
+func (s *selectChildrenByTag) build(e *Element, b *builder) {
+	b.result = newElement(s.space, s.tag, e)
+}
+
 func (s *selectChildrenByTag) apply(e *Element, p *pather) {
 	for _, c := range e.Child {
 		if c, ok := c.(*Element); ok && spaceMatch(s.space, c.Space) && s.tag == c.Tag {
@@ -430,6 +531,40 @@ type filterPos struct {
 
 func newFilterPos(pos int) *filterPos {
 	return &filterPos{pos}
+}
+
+func (f *filterPos) build(b *builder) {
+	parent := b.result.parent
+	if parent == nil {
+		return
+	}
+
+	base := segment{
+		sel:     b.sel,
+		filters: b.filter,
+	}
+	path := Path{segments: []segment{base}}
+
+	pather := newPather()
+	results := pather.traverse(parent, path)
+	if f.index > len(results)-1 {
+		diff := f.index - (len(results) - 1)
+
+		for i := 0; i < diff; i++ {
+			sub := newBuilder(path)
+			base.sel.build(parent, sub)
+
+			for i, f := range base.filters {
+				sub.filter = base.filters[:i]
+				f.build(sub)
+			}
+
+			b.result = sub.result
+		}
+		return
+	}
+
+	b.result = results[f.index]
 }
 
 func (f *filterPos) apply(p *pather) {
@@ -456,6 +591,10 @@ func newFilterAttr(str string) *filterAttr {
 	return &filterAttr{s, l}
 }
 
+func (f *filterAttr) build(b *builder) {
+	b.result.createAttr(f.space, f.key, "", b.result)
+}
+
 func (f *filterAttr) apply(p *pather) {
 	for _, c := range p.candidates {
 		for _, a := range c.Attr {
@@ -479,6 +618,10 @@ func newFilterAttrVal(str, value string) *filterAttrVal {
 	return &filterAttrVal{s, l, value}
 }
 
+func (f *filterAttrVal) build(b *builder) {
+	b.result.createAttr(f.space, f.key, f.val, nil)
+}
+
 func (f *filterAttrVal) apply(p *pather) {
 	for _, c := range p.candidates {
 		for _, a := range c.Attr {
@@ -494,16 +637,20 @@ func (f *filterAttrVal) apply(p *pather) {
 // filterFunc filters the candidate list for elements satisfying a custom
 // boolean function.
 type filterFunc struct {
-	fn func(e *Element) string
+	fn pathFunctions
 }
 
-func newFilterFunc(fn func(e *Element) string) *filterFunc {
+func newFilterFunc(fn pathFunctions) *filterFunc {
 	return &filterFunc{fn}
+}
+
+func (f *filterFunc) build(p *builder) {
+	f.fn.set(p.result, "")
 }
 
 func (f *filterFunc) apply(p *pather) {
 	for _, c := range p.candidates {
-		if f.fn(c) != "" {
+		if f.fn.get(c) != "" {
 			p.scratch = append(p.scratch, c)
 		}
 	}
@@ -513,17 +660,21 @@ func (f *filterFunc) apply(p *pather) {
 // filterFuncVal filters the candidate list for elements containing a value
 // matching the result of a custom function.
 type filterFuncVal struct {
-	fn  func(e *Element) string
+	fn  pathFunctions
 	val string
 }
 
-func newFilterFuncVal(fn func(e *Element) string, value string) *filterFuncVal {
+func newFilterFuncVal(fn pathFunctions, value string) *filterFuncVal {
 	return &filterFuncVal{fn, value}
+}
+
+func (f *filterFuncVal) build(p *builder) {
+	f.fn.set(p.result, f.val)
 }
 
 func (f *filterFuncVal) apply(p *pather) {
 	for _, c := range p.candidates {
-		if f.fn(c) == f.val {
+		if f.fn.get(c) == f.val {
 			p.scratch = append(p.scratch, c)
 		}
 	}
@@ -539,6 +690,11 @@ type filterChild struct {
 func newFilterChild(str string) *filterChild {
 	s, l := spaceDecompose(str)
 	return &filterChild{s, l}
+}
+
+func (f *filterChild) build(b *builder) {
+	b.result.Space = f.space
+	b.result.Tag = f.tag
 }
 
 func (f *filterChild) apply(p *pather) {
@@ -563,6 +719,12 @@ type filterChildText struct {
 func newFilterChildText(str, text string) *filterChildText {
 	s, l := spaceDecompose(str)
 	return &filterChildText{s, l, text}
+}
+
+func (f *filterChildText) build(b *builder) {
+	elem := newElement(f.space, f.tag, b.result)
+	elem.SetText(f.text)
+	b.result.AddChild(elem)
 }
 
 func (f *filterChildText) apply(p *pather) {

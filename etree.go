@@ -400,6 +400,11 @@ func (e *Element) FullTag() string {
 	return e.Space + ":" + e.Tag
 }
 
+// setFullTag sets the element e's complete tag, including namespace prefix.
+func (e *Element) setFullTag(tag string) {
+	e.Space, e.Tag = spaceDecompose(tag)
+}
+
 // NamespaceURI returns the XML namespace URI associated with the element. If
 // the element is part of the XML default namespace, NamespaceURI returns the
 // empty string.
@@ -408,6 +413,10 @@ func (e *Element) NamespaceURI() string {
 		return e.findDefaultNamespaceURI()
 	}
 	return e.findLocalNamespaceURI(e.Space)
+}
+
+func (e *Element) setNamespaceURI(uri string) {
+	e.CreateAttr("xmlns", uri)
 }
 
 // findLocalNamespaceURI finds the namespace URI corresponding to the
@@ -446,9 +455,19 @@ func (e *Element) namespacePrefix() string {
 	return e.Space
 }
 
+// setNamespacePrefix sets the namespace prefix of the element.
+func (e *Element) setNamespacePrefix(prefix string) {
+	e.Space = prefix
+}
+
 // name returns the tag associated with the element.
 func (e *Element) name() string {
 	return e.Tag
+}
+
+// name sets tag associated with the element.
+func (e *Element) setName(s string) {
+	e.Tag = s
 }
 
 // Text returns all character data immediately following the element's opening
@@ -801,6 +820,20 @@ func (e *Element) SelectElements(tag string) []*Element {
 		}
 	}
 	return elements
+}
+
+// MakeElement uses the given XPath-like 'path' to make an element that
+// matches the path. It panics if an invalid path string is supplied.
+func (e *Element) MakeElement(path string) *Element {
+	return e.MakeElementPath(MustCompilePath(path))
+}
+
+// MakeElementPath uses the given 'path' object to make an element that
+// matches the path. It panics if an invalid path string is supplied.
+func (e *Element) MakeElementPath(path Path) *Element {
+	b := newBuilder(path)
+	b.traverse(e)
+	return b.result
 }
 
 // FindElement returns the first element matched by the XPath-like 'path'
