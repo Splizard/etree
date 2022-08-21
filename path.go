@@ -5,7 +5,6 @@
 package etree
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 )
@@ -140,7 +139,6 @@ func (seg *segment) build(e *Element, b *builder) {
 
 	if len(b.pather.candidates) > 0 {
 		b.result = b.pather.candidates[0]
-		fmt.Println(b.result)
 		return
 	}
 
